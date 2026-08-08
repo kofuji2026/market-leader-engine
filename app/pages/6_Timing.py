@@ -264,7 +264,10 @@ if exit_ts_list:
         col=1,
     )
 
-# 損切りラインをチャートに表示し、実際に週の安値が下回っていないか確認する
+# 損切りラインをチャートに表示し、週足終値が下回っていないか確認する。
+# ザラ場の安値(Low)はヒゲで一時的に割っただけのことも多く誤検知になりやすいため、
+# より確度の高い「週足終値」で判定する。あくまで警告のみで、自動イグジットはしない
+# (イグジットするかどうかは人が判断する)。
 existing_stop_loss = None
 stop_loss_breached_week = None
 if sim["entry_id"]:
@@ -282,7 +285,7 @@ if sim["entry_id"]:
         )
         entry_ts = pd.Timestamp(sim["entry_week"])
         after_entry = view[view.index >= entry_ts]
-        breached = after_entry[after_entry["Low"] <= existing_stop_loss]
+        breached = after_entry[after_entry["Close"] <= existing_stop_loss]
         if not breached.empty:
             stop_loss_breached_week = breached.index[0]
 
@@ -308,8 +311,9 @@ st.plotly_chart(
 )
 if stop_loss_breached_week is not None:
     st.error(
-        f"⚠️ {stop_loss_breached_week.strftime('%Y-%m-%d')}週の安値が"
+        f"⚠️ {stop_loss_breached_week.strftime('%Y-%m-%d')}週の終値が"
         f"損切りライン({existing_stop_loss:,.0f}円)を下回りました。"
+        "(イグジットするかどうかはこの警告だけでなく、あなた自身の判断で決めてください)"
     )
 
 # ---- 操作パネル ----
