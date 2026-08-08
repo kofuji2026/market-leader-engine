@@ -14,6 +14,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
+import random  # noqa: E402
+
 import pandas as pd  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
@@ -22,7 +24,7 @@ from plotly.subplots import make_subplots  # noqa: E402
 import lib.indicators  # noqa: E402, F401 — 指標登録のため
 from lib import db, features  # noqa: E402
 from lib.indicators import registry  # noqa: E402
-from lib.screener import detect_surge_periods  # noqa: E402
+from lib.screener import detect_surge_periods, random_period  # noqa: E402
 
 st.set_page_config(page_title="Timing | Market Leader Engine", page_icon="🎯", layout="wide")
 db.init_db()
@@ -43,6 +45,14 @@ min_multiple = col_a.select_slider("最小倍率", options=[1.5, 2.0, 2.5, 3.0, 
 before_weeks = col_b.select_slider("急騰前に表示する週数", options=[60, 70, 80, 90, 100, 110, 120], value=60)
 after_weeks = col_c.select_slider("急騰後、進められる週数", options=[5, 10, 15, 20], value=10)
 
+display_mode = st.radio(
+    "表示順",
+    ["倍率が大きい順", "急騰区間をランダム順", "全期間からランダム抽出(急騰しなかったケースも含む)"],
+    horizontal=True,
+    help="急騰した区間だけを見ていると、成功パターンばかり学習してしまう(生存者バイアス)。"
+    "ランダム抽出なら、初動が似ていても大相場にならなかったケースも自然に混ざる。",
+)
+
 
 @st.cache_data(show_spinner="全銘柄をスキャン中…")
 def _scan_all(codes_and_names: tuple, min_multiple: float):
@@ -59,16 +69,64 @@ def _scan_all(codes_and_names: tuple, min_multiple: float):
     return rows
 
 
+@st.cache_data(show_spinner="ランダムな区間を生成中…")
+def _generate_random(codes_and_names: tuple, before_weeks: int, after_weeks: int, n: int, seed: int):
+    rng = random.Random(seed)
+    codes = list(codes_and_names)
+    rows = []
+    attempts = 0
+    while len(rows) < n and attempts < n * 5:
+        attempts += 1
+        code, name, theme = rng.choice(codes)
+        try:
+            weekly = features.load_weekly(code)
+        except features.FeatureExtractionError:
+            continue
+        period = random_period(weekly, before_weeks, after_weeks, rng)
+        if period is None:
+            continue
+        rows.append({"code": code, "name": name, "theme": theme, "period": period})
+    return rows
+
+
 codes_and_names = tuple((r["code"], r["name"], r["theme"]) for _, r in stocks.iterrows())
-all_surges = _scan_all(codes_and_names, min_multiple)
+
+if display_mode == "倍率が大きい順":
+    all_surges = _scan_all(codes_and_names, min_multiple)
+    order_note = "倍率が大きい順に並んでいます。"
+elif display_mode == "急騰区間をランダム順":
+    shuffle_key = f"timing_shuffle_seed_{min_multiple}"
+    if shuffle_key not in st.session_state:
+        st.session_state[shuffle_key] = random.randint(0, 1_000_000)
+    if st.button("🔀 シャッフルし直す"):
+        st.session_state[shuffle_key] = random.randint(0, 1_000_000)
+        st.session_state[f"timing_idx_{display_mode}_{min_multiple}"] = 0
+        st.rerun()
+    base = _scan_all(codes_and_names, min_multiple)
+    rng = random.Random(st.session_state[shuffle_key])
+    all_surges = base.copy()
+    rng.shuffle(all_surges)
+    order_note = "検出済みの急騰区間(最小倍率以上)を、ランダムな順に並べています。"
+else:
+    random_seed_key = "timing_random_seed"
+    if random_seed_key not in st.session_state:
+        st.session_state[random_seed_key] = random.randint(0, 1_000_000)
+    if st.button("🔀 シャッフルし直す"):
+        st.session_state[random_seed_key] = random.randint(0, 1_000_000)
+        st.session_state[f"timing_idx_{display_mode}_{min_multiple}"] = 0
+        st.rerun()
+    all_surges = _generate_random(
+        codes_and_names, before_weeks, after_weeks, 200, st.session_state[random_seed_key]
+    )
+    order_note = "全期間からランダムに抽出しています(急騰しなかったケースも含みます)。"
 
 if not all_surges:
-    st.info("条件に合う急騰区間が見つかりませんでした。最小倍率を下げてみてください。")
+    st.info("条件に合う区間が見つかりませんでした。設定を変えてみてください。")
     st.stop()
 
-st.write(f"{len(all_surges)}区間を検出({len(stocks)}銘柄中)。倍率が大きい順に並んでいます。")
+st.write(f"{len(all_surges)}区間を対象にしています。{order_note}")
 
-idx_key = f"timing_idx_{min_multiple}"
+idx_key = f"timing_idx_{display_mode}_{min_multiple}"
 if idx_key not in st.session_state:
     st.session_state[idx_key] = 0
 st.session_state[idx_key] = max(0, min(st.session_state[idx_key], len(all_surges) - 1))
@@ -80,7 +138,7 @@ code, name, theme, period = current["code"], current["name"], current["theme"], 
 # 区間ごとの週送り・エントリー/イグジット状態。
 # 1つの急騰区間の中でも複数回エントリーできるように、確定したペアは records に積んでいき、
 # entry_week/exit_week は「今まさに記録しようとしている1回分」だけを保持する。
-sim_key = f"sim_{idx}_{min_multiple}_{before_weeks}_{after_weeks}"
+sim_key = f"sim_{display_mode}_{idx}_{min_multiple}_{before_weeks}_{after_weeks}"
 if sim_key not in st.session_state:
     st.session_state[sim_key] = {
         "reveal": 0,

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 
 import pandas as pd
@@ -99,6 +100,36 @@ def detect_surge_periods(
 
     accepted.sort(key=lambda p: p.trough_date)
     return accepted
+
+
+def random_period(
+    weekly: pd.DataFrame, before_weeks: int, after_weeks: int, rng: random.Random
+) -> SurgePeriod | None:
+    """急騰したかどうかを問わず、ランダムな週を1つ選んで疑似的な区間を作る。
+
+    detect_surge_periodsは「min_multiple倍以上になった」区間しか返さないため、
+    急騰しなかった(≒ダマシだった)ケースを検証に混ぜたい場合はこちらを使う。
+    選んだ週を仮の「谷」、そこからafter_weeks進んだ週を仮の「山」として扱うが、
+    実際には下落しているケースも当然含まれる(multipleが1.0未満になることもある)。
+    """
+    n = len(weekly)
+    lo = before_weeks
+    hi = n - after_weeks - 1
+    if hi <= lo:
+        return None
+    trough_pos = rng.randint(lo, hi)
+    peak_pos = min(trough_pos + after_weeks, n - 1)
+    trough_price = float(weekly["Close"].iloc[trough_pos])
+    peak_price = float(weekly["Close"].iloc[peak_pos])
+    if trough_price <= 0:
+        return None
+    return SurgePeriod(
+        trough_date=weekly.index[trough_pos],
+        peak_date=weekly.index[peak_pos],
+        trough_price=trough_price,
+        peak_price=peak_price,
+        multiple=peak_price / trough_price,
+    )
 
 
 def surge_period_view(
