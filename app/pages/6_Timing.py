@@ -212,9 +212,9 @@ fig.update_xaxes(rangeslider_visible=False, row=1, col=1)
 fig.update_xaxes(rangeslider_visible=False, row=2, col=1)
 fig.update_xaxes(rangeslider_visible=False, row=3, col=1)
 fig.update_layout(
-    height=700,
-    margin=dict(t=20, b=20, l=10, r=10),
-    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    height=380,
+    margin=dict(t=25, b=10, l=10, r=10),
+    legend=dict(orientation="h", yanchor="bottom", y=1.0, font=dict(size=10)),
     dragmode="zoom",
     hovermode="x",
 )
@@ -222,8 +222,8 @@ st.plotly_chart(
     fig,
     use_container_width=True,
     key=f"timing_chart_{idx}_{sim['reveal']}_{min_multiple}_{before_weeks}_{after_weeks}",
+    config={"displayModeBar": False},
 )
-st.caption("グラフ上をドラッグすると期間を拡大できます(ダブルクリックで全体表示に戻ります)。")
 
 # ---- 操作パネル ----
 # 「この週のローソク足を見て判断する」→ 実際に売買が成立するのは翌営業週の寄付になるため、
@@ -243,6 +243,7 @@ if latest_week is not None:
                 "なぜこの週にエントリーしたいと思ったか",
                 key=f"entry_comment_{idx}_{sim['reveal']}",
                 placeholder="例: EMA16を上から下に割らずに反発、出来高も増加",
+                height=68,
             )
     else:
         total_exit_pct_preview = db.total_exit_percentage(sim["entry_id"])
@@ -255,6 +256,7 @@ if latest_week is not None:
             exit_comment = st.text_area(
                 "なぜここでイグジットする判断をしたか",
                 key=f"exit_comment_{idx}_{sim['entry_id']}_{sim['reveal']}",
+                height=68,
                 placeholder="例: RSIが70を超えて過熱、上ヒゲが目立ってきた",
             )
 
