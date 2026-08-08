@@ -103,9 +103,18 @@ nav3.write(f"**{idx + 1} / {len(all_surges)}区間目**")
 
 st.subheader(f"{code} {name} ({theme or '—'})")
 
-weekly = features.load_weekly(code)
-computed = registry.compute_all(weekly)
-computed["close_pct_change"] = computed["Close"].pct_change() * 100
+
+@st.cache_data(show_spinner=False)
+def _load_and_compute(code: str):
+    """週足データ+全指標の計算結果をキャッシュする。「次の週へ」等で銘柄が変わらない限り、
+    17種類の指標を毎回再計算する必要がなくなり、体感速度が上がる。"""
+    weekly = features.load_weekly(code)
+    computed = registry.compute_all(weekly)
+    computed["close_pct_change"] = computed["Close"].pct_change() * 100
+    return computed
+
+
+computed = _load_and_compute(code)
 
 idx_all = computed.index
 trough_pos = idx_all.get_indexer([period.trough_date])[0]
