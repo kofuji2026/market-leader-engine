@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS stocks (
     name       TEXT NOT NULL,
     theme      TEXT,
     extra_json TEXT,
+    split      TEXT,  -- 'train' or 'validation'。特徴量やルールは訓練用銘柄だけを見て作り、検証用は最後の答え合わせに使う
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
@@ -81,6 +82,7 @@ CREATE TABLE IF NOT EXISTS exit_events (
 ALTER TABLE entries ADD COLUMN IF NOT EXISTS exit_week TEXT;
 ALTER TABLE exit_events ADD COLUMN IF NOT EXISTS comment TEXT;
 ALTER TABLE entries ADD COLUMN IF NOT EXISTS stop_loss_price DOUBLE PRECISION;
+ALTER TABLE stocks ADD COLUMN IF NOT EXISTS split TEXT;
 """
 
 
@@ -149,9 +151,14 @@ def delete_stock(code: str) -> None:
             cur.execute("DELETE FROM stocks WHERE code = %s", (code,))
 
 
-def list_stocks() -> pd.DataFrame:
+def list_stocks(split: str | None = None) -> pd.DataFrame:
     with get_connection() as conn:
-        df = pd.read_sql_query("SELECT * FROM stocks ORDER BY created_at DESC", conn)
+        if split is None:
+            df = pd.read_sql_query("SELECT * FROM stocks ORDER BY created_at DESC", conn)
+        else:
+            df = pd.read_sql_query(
+                "SELECT * FROM stocks WHERE split = %s ORDER BY created_at DESC", conn, params=(split,)
+            )
     return df
 
 
@@ -161,6 +168,22 @@ def stock_exists(code: str) -> bool:
             cur.execute("SELECT 1 FROM stocks WHERE code = %s", (code,))
             row = cur.fetchone()
     return row is not None
+
+
+def set_stock_split(code: str, split: str | None) -> None:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE stocks SET split = %s WHERE code = %s", (split, code))
+
+
+def assign_splits(train_codes: list[str], validation_codes: list[str]) -> None:
+    """銘柄コードのリストからtrain/validationの割り当てを一括反映する。"""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "UPDATE stocks SET split = %s WHERE code = %s",
+                [("train", code) for code in train_codes] + [("validation", code) for code in validation_codes],
+            )
 
 
 # ---------- entries (② エントリー週記録) ----------

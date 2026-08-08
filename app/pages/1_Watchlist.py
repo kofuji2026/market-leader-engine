@@ -87,19 +87,45 @@ with tab_import:
             st.dataframe(pd.DataFrame(results), use_container_width=True)
             st.rerun()
 
+SPLIT_LABEL = {"train": "🎓 訓練用", "validation": "🧪 検証用"}
+
 with tab_list:
     stocks = db.list_stocks()
     if stocks.empty:
         st.info("まだ銘柄が登録されていません。")
     else:
-        st.write(f"登録済み: {len(stocks)}件")
-        for _, row in stocks.iterrows():
+        split_counts = stocks["split"].value_counts(dropna=False)
+        n_train = int(split_counts.get("train", 0))
+        n_val = int(split_counts.get("validation", 0))
+        n_unassigned = len(stocks) - n_train - n_val
+        st.write(
+            f"登録済み: {len(stocks)}件 (🎓訓練用 {n_train} / 🧪検証用 {n_val}"
+            + (f" / 未割り当て {n_unassigned}" if n_unassigned else "")
+            + ")"
+        )
+        st.caption(
+            "特徴量やルールは🎓訓練用の銘柄だけを見て作り、🧪検証用は最後の答え合わせにのみ使う"
+            "(検証用を見ながらルールを調整すると、答えを知った上で予想するのと同じになるため)。"
+        )
+
+        filter_choice = st.radio(
+            "表示する銘柄", ["すべて", "🎓 訓練用のみ", "🧪 検証用のみ"], horizontal=True, key="watchlist_split_filter"
+        )
+        if filter_choice == "🎓 訓練用のみ":
+            display_stocks = stocks[stocks["split"] == "train"]
+        elif filter_choice == "🧪 検証用のみ":
+            display_stocks = stocks[stocks["split"] == "validation"]
+        else:
+            display_stocks = stocks
+
+        for _, row in display_stocks.iterrows():
             has_data = (PROCESSED_DIR / f"{row['code']}_weekly.csv").exists()
-            c1, c2, c3, c4, c5 = st.columns([1, 2, 2, 1, 1])
+            c1, c2, c3, c4, c5, c6 = st.columns([1, 2, 2, 1, 1, 1])
             c1.write(f"**{row['code']}**")
             c2.write(row["name"])
             c3.write(row["theme"] or "—")
             c4.write("✅データ有" if has_data else "⚠️未取得")
-            if c5.button("削除", key=f"del_{row['code']}"):
+            c5.write(SPLIT_LABEL.get(row["split"], "—"))
+            if c6.button("削除", key=f"del_{row['code']}"):
                 db.delete_stock(row["code"])
                 st.rerun()
