@@ -89,3 +89,55 @@ def compute_trade_return(code: str, entry_week: str, exit_week: str | None) -> d
         "exit_price": exit_price,
         "return_pct": (exit_price / entry_price - 1) * 100,
     }
+
+
+def compute_trade_return_multi(code: str, entry_week: str, exit_events: list[dict]) -> dict | None:
+    """entry_week週の始値(翌週寄付)でエントリーし、複数回に分けてイグジット(部分決済)した
+    場合の、手仕舞い割合で加重平均した騰落率を計算する。
+
+    exit_events: [{"exit_week": "YYYY-MM-DD", "exit_percentage": 50.0}, ...]
+    Returns:
+        {"entry_price", "total_exit_percentage", "weighted_return_pct", "legs": [...]}
+        legsの各要素は {"exit_week", "exit_percentage", "exit_price", "return_pct"}。
+        有効なイグジットが1件もなければNone。
+    """
+    if not exit_events:
+        return None
+    weekly = load_weekly(code)
+    entry_ts = pd.Timestamp(entry_week)
+    if entry_ts not in weekly.index:
+        return None
+    entry_price = float(weekly.loc[entry_ts, "Open"])
+    if entry_price <= 0:
+        return None
+
+    legs = []
+    weighted_sum = 0.0
+    total_pct = 0.0
+    for ev in exit_events:
+        exit_ts = pd.Timestamp(ev["exit_week"])
+        if exit_ts not in weekly.index:
+            continue
+        exit_price = float(weekly.loc[exit_ts, "Open"])
+        return_pct = (exit_price / entry_price - 1) * 100
+        pct = float(ev["exit_percentage"])
+        legs.append(
+            {
+                "exit_week": ev["exit_week"],
+                "exit_percentage": pct,
+                "exit_price": exit_price,
+                "return_pct": return_pct,
+            }
+        )
+        weighted_sum += return_pct * pct
+        total_pct += pct
+
+    if total_pct <= 0:
+        return None
+
+    return {
+        "entry_price": entry_price,
+        "total_exit_percentage": total_pct,
+        "weighted_return_pct": weighted_sum / total_pct,
+        "legs": legs,
+    }

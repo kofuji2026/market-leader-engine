@@ -27,14 +27,23 @@ if wide.empty:
     st.info("まだエントリー記録がありません。「Entry」画面から登録してください。")
     st.stop()
 
-wide["return_pct"] = wide.apply(
-    lambda r: (features.compute_trade_return(r["stock_code"], r["entry_week"], r["exit_week"]) or {}).get(
-        "return_pct"
-    ),
-    axis=1,
-)
+all_exit_events = db.get_all_exit_events()
 
-meta_cols = ["stock_code", "stock_name", "entry_week", "exit_week", "return_pct", "comment"]
+
+def _weighted_return(row):
+    if all_exit_events.empty:
+        events = []
+    else:
+        events = all_exit_events[all_exit_events["entry_id"] == row["entry_id"]][
+            ["exit_week", "exit_percentage"]
+        ].to_dict("records")
+    result = features.compute_trade_return_multi(row["stock_code"], row["entry_week"], events)
+    return result["weighted_return_pct"] if result else None
+
+
+wide["return_pct"] = wide.apply(_weighted_return, axis=1)
+
+meta_cols = ["stock_code", "stock_name", "entry_week", "return_pct", "comment"]
 feature_cols = [c for c in wide.columns if c not in meta_cols + ["entry_id"]]
 
 st.write(f"エントリー記録: {len(wide)}件 / 特徴量: {len(feature_cols)}種類")

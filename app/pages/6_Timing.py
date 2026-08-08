@@ -86,8 +86,7 @@ if sim_key not in st.session_state:
         "reveal": 0,
         "entry_week": None,
         "entry_id": None,
-        "exit_week": None,
-        "records": [],
+        "records": [],  # 完全クローズ済みの過去分: [{"entry_week", "exit_events":[{exit_week, exit_percentage}]}]
     }
 sim = st.session_state[sim_key]
 sim.setdefault("records", [])
@@ -172,7 +171,11 @@ fig.add_trace(
 all_entry_weeks = [r["entry_week"] for r in sim["records"]] + (
     [sim["entry_week"]] if sim["entry_week"] else []
 )
-all_exit_weeks = [r["exit_week"] for r in sim["records"]] + ([sim["exit_week"]] if sim["exit_week"] else [])
+all_exit_weeks = [e["exit_week"] for r in sim["records"] for e in r["exit_events"]]
+if sim["entry_id"]:
+    current_exit_events = db.get_exit_events(sim["entry_id"])
+    if not current_exit_events.empty:
+        all_exit_weeks.extend(current_exit_events["exit_week"].tolist())
 
 entry_ts_list = [pd.Timestamp(w) for w in all_entry_weeks if pd.Timestamp(w) in view.index]
 if entry_ts_list:
@@ -230,6 +233,31 @@ latest_week = view.index[-1] if not view.empty else None
 next_week = idx_all[end_pos] if end_pos < len(idx_all) else None
 at_max = end_pos >= max_end_pos
 
+if latest_week is not None:
+    latest_week_str = latest_week.strftime("%Y-%m-%d")
+    next_week_str = next_week.strftime("%Y-%m-%d") if next_week is not None else None
+
+    if sim["entry_week"] is None:
+        if next_week_str is not None:
+            entry_comment = st.text_area(
+                "なぜこの週にエントリーしたいと思ったか",
+                key=f"entry_comment_{idx}_{sim['reveal']}",
+                placeholder="例: EMA16を上から下に割らずに反発、出来高も増加",
+            )
+    else:
+        total_exit_pct_preview = db.total_exit_percentage(sim["entry_id"])
+        remaining_pct_preview = round(100 - total_exit_pct_preview, 4)
+        if (
+            remaining_pct_preview > 0
+            and latest_week_str >= sim["entry_week"]
+            and next_week_str is not None
+        ):
+            exit_comment = st.text_area(
+                "なぜここでイグジットする判断をしたか",
+                key=f"exit_comment_{idx}_{sim['entry_id']}_{sim['reveal']}",
+                placeholder="例: RSIが70を超えて過熱、上ヒゲが目立ってきた",
+            )
+
 c0, c1, c2, c3 = st.columns(4)
 
 if c0.button("← 前の週へ", disabled=(sim["reveal"] <= 0), type="secondary"):
@@ -241,58 +269,74 @@ if c1.button("次の週へ →", disabled=at_max, type="secondary"):
     st.rerun()
 
 if latest_week is not None:
-    latest_week_str = latest_week.strftime("%Y-%m-%d")
-    next_week_str = next_week.strftime("%Y-%m-%d") if next_week is not None else None
-
     if sim["entry_week"] is None:
         if next_week_str is None:
             c2.button("ここでエントリー", disabled=True, help="翌週(約定週)のデータがまだ存在しません")
         else:
             if c2.button(f"ここでエントリー(判断週{latest_week_str}→約定{next_week_str}寄付)", type="primary"):
-                entry_id = db.add_entry(
-                    code,
-                    next_week_str,
-                    comment=f"Timing画面で記録: {name}(判断週{latest_week_str}のローソク足を見て、翌週{next_week_str}の寄付でエントリー)",
-                )
+                entry_id = db.add_entry(code, next_week_str, comment=entry_comment)
                 feats, _ = features.extract_features_for_entry(code, latest_week_str)
                 db.save_entry_features(entry_id, feats)
                 sim["entry_week"] = next_week_str
                 sim["entry_id"] = entry_id
                 st.rerun()
-    elif sim["exit_week"] is None:
-        if latest_week_str < sim["entry_week"]:
+    else:
+        # 部分イグジット(分割決済)対応: 残りポジションが0%になるまで、何度でもイグジットできる
+        total_exit_pct = db.total_exit_percentage(sim["entry_id"])
+        remaining_pct = round(100 - total_exit_pct, 4)
+
+        if remaining_pct <= 0:
+            exit_events_df = db.get_exit_events(sim["entry_id"])
+            trade_return = features.compute_trade_return_multi(
+                code, sim["entry_week"], exit_events_df[["exit_week", "exit_percentage"]].to_dict("records")
+            )
+            return_text = f"　【加重平均 {trade_return['weighted_return_pct']:+.1f}%】" if trade_return else ""
+            legs_text = " / ".join(
+                f"{r['exit_week']}({r['exit_percentage']:.0f}%)" for _, r in exit_events_df.iterrows()
+            )
+            c2.success(f"エントリー(約定) {sim['entry_week']} → 完全クローズ: {legs_text}{return_text}")
+        elif latest_week_str < sim["entry_week"]:
             c2.button("ここでイグジット", disabled=True, help="エントリー(約定)週以降に進んでから押せます")
         elif next_week_str is None:
             c2.button("ここでイグジット", disabled=True, help="翌週(約定週)のデータがまだ存在しません")
         else:
-            if c2.button(f"ここでイグジット(判断週{latest_week_str}→約定{next_week_str}寄付)", type="primary"):
-                db.set_exit_week(sim["entry_id"], next_week_str)
-                sim["exit_week"] = next_week_str
+            pct_choices = sorted({p for p in [100, 75, 50, 25] if p <= remaining_pct} | {remaining_pct}, reverse=True)
+            chosen_pct = c2.selectbox(
+                f"イグジットする割合(残り{remaining_pct:.0f}%)",
+                pct_choices,
+                format_func=lambda p: f"{p:.0f}%",
+                key=f"exit_pct_{idx}_{sim['entry_id']}_{sim['reveal']}",
+            )
+            if c2.button(
+                f"ここで{chosen_pct:.0f}%イグジット(判断週{latest_week_str}→約定{next_week_str}寄付)",
+                type="primary",
+            ):
+                db.add_exit_event(sim["entry_id"], next_week_str, chosen_pct, comment=exit_comment)
                 st.rerun()
-    else:
-        trade_return = features.compute_trade_return(code, sim["entry_week"], sim["exit_week"])
-        return_text = f"　【{trade_return['return_pct']:+.1f}%】" if trade_return else ""
-        c2.success(
-            f"エントリー(約定) {sim['entry_week']} → イグジット(約定) {sim['exit_week']} 記録済み{return_text}"
-        )
 
-if sim["entry_week"] and sim["exit_week"]:
+if sim["entry_id"] and db.total_exit_percentage(sim["entry_id"]) >= 100:
     if c3.button("次の区間へ進む →", type="primary"):
         st.session_state[idx_key] = min(idx + 1, len(all_surges) - 1)
         st.rerun()
 
     c4, _ = st.columns([1, 3])
     if c4.button("この区間でもう一度エントリーする", type="secondary"):
-        sim["records"].append({"entry_week": sim["entry_week"], "exit_week": sim["exit_week"]})
+        exit_events_df = db.get_exit_events(sim["entry_id"])
+        sim["records"].append(
+            {
+                "entry_week": sim["entry_week"],
+                "exit_events": exit_events_df[["exit_week", "exit_percentage"]].to_dict("records"),
+            }
+        )
         sim["entry_week"] = None
         sim["entry_id"] = None
-        sim["exit_week"] = None
         st.rerun()
 
 if sim["records"]:
     st.caption(f"この区間ではすでに{len(sim['records'])}件のエントリー/イグジットを記録済みです。")
 
-if at_max and not (sim["entry_week"] and sim["exit_week"]):
+is_fully_closed = sim["entry_id"] is not None and db.total_exit_percentage(sim["entry_id"]) >= 100
+if at_max and not is_fully_closed:
     st.info("この区間で表示できる範囲の上限まで進みました。エントリー/イグジットを記録するか、次の区間に進んでください。")
 
 with st.expander("この銘柄の記録済みエントリー"):
@@ -303,16 +347,30 @@ with st.expander("この銘柄の記録済みエントリー"):
         st.caption("週の変更やコメント編集は「Entry」画面から行えます。ここでは削除のみできます。")
         for _, erow in existing_entries.iterrows():
             ecol1, ecol2 = st.columns([5, 1])
-            exit_text = f" → イグジット {erow['exit_week']}" if erow["exit_week"] else ""
-            erow_return = features.compute_trade_return(code, erow["entry_week"], erow["exit_week"])
-            return_text = f"　【{erow_return['return_pct']:+.1f}%】" if erow_return else ""
-            ecol1.write(
-                f"{erow['entry_week']}{exit_text}{return_text} — {erow['comment'] or '(コメントなし)'}"
-            )
+            exit_events_df = db.get_exit_events(erow["id"])
+            if exit_events_df.empty:
+                exit_text = ""
+                return_text = ""
+            else:
+                legs_text = " / ".join(
+                    f"{r['exit_week']}({r['exit_percentage']:.0f}%)" for _, r in exit_events_df.iterrows()
+                )
+                exit_text = f" → イグジット: {legs_text}"
+                trade_return = features.compute_trade_return_multi(
+                    code,
+                    erow["entry_week"],
+                    exit_events_df[["exit_week", "exit_percentage"]].to_dict("records"),
+                )
+                return_text = f"　【加重平均 {trade_return['weighted_return_pct']:+.1f}%】" if trade_return else ""
+            ecol1.write(f"{erow['entry_week']}{exit_text}{return_text}")
+            ecol1.caption(f"エントリー理由: {erow['comment'] or '(コメントなし)'}")
+            if not exit_events_df.empty:
+                for _, ev in exit_events_df.iterrows():
+                    if ev["comment"]:
+                        ecol1.caption(f"　{ev['exit_week']}({ev['exit_percentage']:.0f}%)の理由: {ev['comment']}")
             if ecol2.button("削除", key=f"timing_del_entry_{erow['id']}"):
                 db.delete_entry(erow["id"])
                 if sim.get("entry_id") == erow["id"]:
                     sim["entry_week"] = None
                     sim["entry_id"] = None
-                    sim["exit_week"] = None
                 st.rerun()

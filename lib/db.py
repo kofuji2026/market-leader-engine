@@ -65,7 +65,20 @@ CREATE TABLE IF NOT EXISTS hypotheses (
     updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+-- 部分イグジット(分割決済)。1つのentryに対して複数回のイグジットを記録できるようにする
+-- (例: 50%を week1で利確、残り50%をweek2で利確)。全exit_percentageの合計が100になったら
+-- ポジションは完全クローズとみなす。
+CREATE TABLE IF NOT EXISTS exit_events (
+    id              SERIAL PRIMARY KEY,
+    entry_id        INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+    exit_week       TEXT NOT NULL,
+    exit_percentage DOUBLE PRECISION NOT NULL,
+    comment         TEXT,
+    created_at      TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
 ALTER TABLE entries ADD COLUMN IF NOT EXISTS exit_week TEXT;
+ALTER TABLE exit_events ADD COLUMN IF NOT EXISTS comment TEXT;
 """
 
 
@@ -197,6 +210,51 @@ def list_entries(stock_code: str | None = None) -> pd.DataFrame:
     with get_connection() as conn:
         df = pd.read_sql_query(query, conn, params=params)
     return df
+
+
+# ---------- exit_events (部分イグジット/分割決済) ----------
+
+def add_exit_event(entry_id: int, exit_week: str, exit_percentage: float, comment: str = "") -> int:
+    """entry_idに対して部分(または全部)イグジットを1件追加する。
+    同じ回のexit_percentageの合計が100を超えないかはUI側でチェックする想定。"""
+    with get_connection() as conn:
+        with _dict_cursor(conn) as cur:
+            cur.execute(
+                "INSERT INTO exit_events (entry_id, exit_week, exit_percentage, comment) "
+                "VALUES (%s, %s, %s, %s) RETURNING id",
+                (entry_id, exit_week, exit_percentage, comment),
+            )
+            return cur.fetchone()["id"]
+
+
+def delete_exit_event(exit_event_id: int) -> None:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM exit_events WHERE id = %s", (exit_event_id,))
+
+
+def get_exit_events(entry_id: int) -> pd.DataFrame:
+    with get_connection() as conn:
+        df = pd.read_sql_query(
+            "SELECT * FROM exit_events WHERE entry_id = %(entry_id)s ORDER BY exit_week",
+            conn,
+            params={"entry_id": entry_id},
+        )
+    return df
+
+
+def get_all_exit_events() -> pd.DataFrame:
+    with get_connection() as conn:
+        df = pd.read_sql_query("SELECT * FROM exit_events ORDER BY entry_id, exit_week", conn)
+    return df
+
+
+def total_exit_percentage(entry_id: int) -> float:
+    """このentryがこれまでに手仕舞いした割合の合計(0〜100)。"""
+    events = get_exit_events(entry_id)
+    if events.empty:
+        return 0.0
+    return float(events["exit_percentage"].sum())
 
 
 # ---------- entry_features (③ 特徴量、縦持ち) ----------

@@ -70,19 +70,66 @@ if entries.empty:
     st.caption("まだ記録がありません。")
 else:
     for _, row in entries.iterrows():
-        trade_return = features.compute_trade_return(code, row["entry_week"], row["exit_week"])
-        exit_label = f" → イグジット {row['exit_week']}" if row["exit_week"] else ""
-        return_label = f"  【{trade_return['return_pct']:+.1f}%】" if trade_return else ""
+        exit_events_df = db.get_exit_events(row["id"])
+        total_pct = db.total_exit_percentage(row["id"])
+        exit_records = (
+            exit_events_df[["exit_week", "exit_percentage"]].to_dict("records")
+            if not exit_events_df.empty
+            else []
+        )
+        trade_return = features.compute_trade_return_multi(code, row["entry_week"], exit_records)
+
+        if exit_records:
+            legs_text = " / ".join(f"{r['exit_week']}({r['exit_percentage']:.0f}%)" for r in exit_records)
+            exit_label = f" → {legs_text}"
+        else:
+            exit_label = ""
+        return_label = f"  【加重平均{trade_return['weighted_return_pct']:+.1f}%】" if trade_return else ""
+
         with st.expander(f"{row['entry_week']}{exit_label}{return_label} — {row['comment'] or '(コメントなし)'}"):
             if trade_return:
-                st.metric(
-                    "騰落率(エントリー寄付 → イグジット寄付)",
-                    f"{trade_return['return_pct']:+.1f}%",
-                    delta=f"{trade_return['exit_price']:,.1f}円 - {trade_return['entry_price']:,.1f}円",
-                )
-            exit_options = ["(未設定)"] + [w for w in week_options if w > row["entry_week"]]
-            current_exit = row["exit_week"] if row["exit_week"] in exit_options else "(未設定)"
+                st.metric("加重平均騰落率", f"{trade_return['weighted_return_pct']:+.1f}%")
 
+            # ---- イグジット記録(部分イグジット対応) ----
+            st.markdown(f"**イグジット記録**(累計 {total_pct:.0f}%)")
+            if not exit_events_df.empty:
+                for _, ev in exit_events_df.iterrows():
+                    ev_col1, ev_col2 = st.columns([4, 1])
+                    ev_col1.write(f"{ev['exit_week']} — {ev['exit_percentage']:.0f}%")
+                    if ev["comment"]:
+                        ev_col1.caption(f"理由: {ev['comment']}")
+                    if ev_col2.button("削除", key=f"del_exit_{ev['id']}"):
+                        db.delete_exit_event(ev["id"])
+                        st.rerun()
+
+            remaining_pct = round(100 - total_pct, 4)
+            exit_week_options = [w for w in week_options if w > row["entry_week"]]
+            if remaining_pct > 0 and exit_week_options:
+                with st.form(f"add_exit_{row['id']}"):
+                    new_exit_week = st.selectbox(
+                        "イグジット週", exit_week_options, key=f"new_exit_week_{row['id']}"
+                    )
+                    new_exit_pct = st.number_input(
+                        f"イグジット割合(残り{remaining_pct:.0f}%まで)",
+                        min_value=1.0,
+                        max_value=float(remaining_pct),
+                        value=float(min(50.0, remaining_pct)),
+                        step=1.0,
+                        key=f"new_exit_pct_{row['id']}",
+                    )
+                    new_exit_comment = st.text_area(
+                        "なぜここでイグジットする判断をしたか",
+                        placeholder="例: RSIが70を超えて過熱、上ヒゲが目立ってきた",
+                        key=f"new_exit_comment_{row['id']}",
+                    )
+                    add_exit_clicked = st.form_submit_button("イグジットを追加")
+                if add_exit_clicked:
+                    db.add_exit_event(row["id"], new_exit_week, new_exit_pct, comment=new_exit_comment)
+                    st.rerun()
+
+            st.divider()
+
+            # ---- エントリー週・コメント編集 ----
             with st.form(f"edit_entry_{row['id']}"):
                 st.caption("エントリー週=実際に約定した(翌週寄付の)週。特徴量はその前週の情報で再計算されます。")
                 new_entry_week = st.selectbox(
@@ -90,12 +137,6 @@ else:
                     week_options,
                     index=week_options.index(row["entry_week"]) if row["entry_week"] in week_options else 0,
                     key=f"edit_entry_week_{row['id']}",
-                )
-                new_exit_week = st.selectbox(
-                    "イグジット週(任意)",
-                    exit_options,
-                    index=exit_options.index(current_exit),
-                    key=f"edit_exit_week_{row['id']}",
                 )
                 new_comment = st.text_area(
                     "コメント", value=row["comment"] or "", key=f"edit_comment_{row['id']}"
@@ -107,9 +148,6 @@ else:
             if save_clicked:
                 try:
                     db.update_entry(row["id"], new_entry_week, new_comment)
-                    db.set_exit_week(
-                        row["id"], None if new_exit_week == "(未設定)" else new_exit_week
-                    )
                     if new_entry_week != row["entry_week"]:
                         # 約定週(new_entry_week)の前週=判断週の情報で特徴量を計算し直す
                         entry_pos = weekly.index.get_indexer([pd.Timestamp(new_entry_week)])[0]
