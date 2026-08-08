@@ -35,12 +35,13 @@ CREATE TABLE IF NOT EXISTS stocks (
 );
 
 CREATE TABLE IF NOT EXISTS entries (
-    id          SERIAL PRIMARY KEY,
-    stock_code  TEXT NOT NULL REFERENCES stocks(code) ON DELETE CASCADE,
-    entry_week  TEXT NOT NULL,  -- 週足の週末日(YYYY-MM-DD)
-    exit_week   TEXT,  -- 週足の週末日(YYYY-MM-DD)。未確定のうちはNULL
-    comment     TEXT,
-    created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+    id              SERIAL PRIMARY KEY,
+    stock_code      TEXT NOT NULL REFERENCES stocks(code) ON DELETE CASCADE,
+    entry_week      TEXT NOT NULL,  -- 週足の週末日(YYYY-MM-DD)
+    exit_week       TEXT,  -- 週足の週末日(YYYY-MM-DD)。未確定のうちはNULL
+    stop_loss_price DOUBLE PRECISION,  -- エントリー時に決めた損切りライン(円)。必須運用
+    comment         TEXT,
+    created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
     UNIQUE(stock_code, entry_week)
 );
 
@@ -79,6 +80,7 @@ CREATE TABLE IF NOT EXISTS exit_events (
 
 ALTER TABLE entries ADD COLUMN IF NOT EXISTS exit_week TEXT;
 ALTER TABLE exit_events ADD COLUMN IF NOT EXISTS comment TEXT;
+ALTER TABLE entries ADD COLUMN IF NOT EXISTS stop_loss_price DOUBLE PRECISION;
 """
 
 
@@ -163,14 +165,16 @@ def stock_exists(code: str) -> bool:
 
 # ---------- entries (② エントリー週記録) ----------
 
-def add_entry(stock_code: str, entry_week: str, comment: str = "") -> int:
+def add_entry(stock_code: str, entry_week: str, comment: str = "", stop_loss_price: float | None = None) -> int:
     with get_connection() as conn:
         with _dict_cursor(conn) as cur:
             cur.execute(
-                "INSERT INTO entries (stock_code, entry_week, comment) VALUES (%s, %s, %s) "
-                "ON CONFLICT(stock_code, entry_week) DO UPDATE SET comment=excluded.comment "
+                "INSERT INTO entries (stock_code, entry_week, comment, stop_loss_price) "
+                "VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT(stock_code, entry_week) DO UPDATE SET comment=excluded.comment, "
+                "stop_loss_price=excluded.stop_loss_price "
                 "RETURNING id",
-                (stock_code, entry_week, comment),
+                (stock_code, entry_week, comment, stop_loss_price),
             )
             return cur.fetchone()["id"]
 
@@ -182,12 +186,20 @@ def set_exit_week(entry_id: int, exit_week: str | None) -> None:
             cur.execute("UPDATE entries SET exit_week = %s WHERE id = %s", (exit_week, entry_id))
 
 
-def update_entry(entry_id: int, entry_week: str, comment: str) -> None:
+def set_stop_loss_price(entry_id: int, stop_loss_price: float | None) -> None:
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE entries SET entry_week = %s, comment = %s WHERE id = %s",
-                (entry_week, comment, entry_id),
+                "UPDATE entries SET stop_loss_price = %s WHERE id = %s", (stop_loss_price, entry_id)
+            )
+
+
+def update_entry(entry_id: int, entry_week: str, comment: str, stop_loss_price: float | None = None) -> None:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE entries SET entry_week = %s, comment = %s, stop_loss_price = %s WHERE id = %s",
+                (entry_week, comment, stop_loss_price, entry_id),
             )
 
 
@@ -195,6 +207,14 @@ def delete_entry(entry_id: int) -> None:
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM entries WHERE id = %s", (entry_id,))
+
+
+def get_entry(entry_id: int) -> dict | None:
+    with get_connection() as conn:
+        with _dict_cursor(conn) as cur:
+            cur.execute("SELECT * FROM entries WHERE id = %s", (entry_id,))
+            row = cur.fetchone()
+    return dict(row) if row else None
 
 
 def list_entries(stock_code: str | None = None) -> pd.DataFrame:

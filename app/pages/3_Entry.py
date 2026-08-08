@@ -141,13 +141,25 @@ else:
                 new_comment = st.text_area(
                     "コメント", value=row["comment"] or "", key=f"edit_comment_{row['id']}"
                 )
+                new_stop_loss = st.number_input(
+                    "損切りライン(円)",
+                    min_value=0.0,
+                    value=float(row["stop_loss_price"]) if row["stop_loss_price"] else 0.0,
+                    step=1.0,
+                    key=f"edit_stop_loss_{row['id']}",
+                )
                 col_save, col_delete = st.columns(2)
                 save_clicked = col_save.form_submit_button("この内容で更新", type="primary")
                 delete_clicked = col_delete.form_submit_button("この記録を削除")
 
             if save_clicked:
                 try:
-                    db.update_entry(row["id"], new_entry_week, new_comment)
+                    db.update_entry(
+                        row["id"],
+                        new_entry_week,
+                        new_comment,
+                        new_stop_loss if new_stop_loss > 0 else None,
+                    )
                     if new_entry_week != row["entry_week"]:
                         # 約定週(new_entry_week)の前週=判断週の情報で特徴量を計算し直す
                         entry_pos = weekly.index.get_indexer([pd.Timestamp(new_entry_week)])[0]

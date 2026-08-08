@@ -29,6 +29,8 @@ from lib.screener import detect_surge_periods, random_period  # noqa: E402
 st.set_page_config(page_title="Timing | Market Leader Engine", page_icon="🎯", layout="wide")
 db.init_db()
 
+MIN_TURNOVER = 1_000_000_000  # 週間売買代金がこれ未満の週は、実弾で買えないとみなしエントリー対象外にする
+
 st.title("🎯 Timing(急騰タイミング分析)")
 st.caption(
     "急騰「前」のチャートだけを見ながら、1週ずつ先を明らかにしていく。"
@@ -262,6 +264,28 @@ if exit_ts_list:
         col=1,
     )
 
+# 損切りラインをチャートに表示し、実際に週の安値が下回っていないか確認する
+existing_stop_loss = None
+stop_loss_breached_week = None
+if sim["entry_id"]:
+    entry_row = db.get_entry(sim["entry_id"])
+    if entry_row and entry_row.get("stop_loss_price"):
+        existing_stop_loss = float(entry_row["stop_loss_price"])
+        fig.add_hline(
+            y=existing_stop_loss,
+            line_dash="dash",
+            line_color="#e03131",
+            annotation_text=f"損切りライン {existing_stop_loss:,.0f}円",
+            annotation_position="bottom right",
+            row=1,
+            col=1,
+        )
+        entry_ts = pd.Timestamp(sim["entry_week"])
+        after_entry = view[view.index >= entry_ts]
+        breached = after_entry[after_entry["Low"] <= existing_stop_loss]
+        if not breached.empty:
+            stop_loss_breached_week = breached.index[0]
+
 fig.update_yaxes(type="log", autorange=True, row=1, col=1)
 fig.update_yaxes(range=[50, 100], title_text="RSI10", row=2, col=1)
 fig.update_yaxes(type="linear", autorange=True, title_text="売買代金", row=3, col=1)
@@ -282,6 +306,11 @@ st.plotly_chart(
     key=f"timing_chart_{idx}_{sim['reveal']}_{min_multiple}_{before_weeks}_{after_weeks}",
     config={"displayModeBar": False},
 )
+if stop_loss_breached_week is not None:
+    st.error(
+        f"⚠️ {stop_loss_breached_week.strftime('%Y-%m-%d')}週の安値が"
+        f"損切りライン({existing_stop_loss:,.0f}円)を下回りました。"
+    )
 
 # ---- 操作パネル ----
 # 「この週のローソク足を見て判断する」→ 実際に売買が成立するのは翌営業週の寄付になるため、
@@ -294,15 +323,33 @@ at_max = end_pos >= max_end_pos
 if latest_week is not None:
     latest_week_str = latest_week.strftime("%Y-%m-%d")
     next_week_str = next_week.strftime("%Y-%m-%d") if next_week is not None else None
+    latest_turnover = float(view.loc[latest_week, "turnover"]) if latest_week in view.index else None
+    liquidity_ok = latest_turnover is not None and latest_turnover >= MIN_TURNOVER
 
     if sim["entry_week"] is None:
         if next_week_str is not None:
-            entry_comment = st.text_area(
+            ecol1, ecol2 = st.columns([2, 1])
+            entry_comment = ecol1.text_area(
                 "なぜこの週にエントリーしたいと思ったか",
                 key=f"entry_comment_{idx}_{sim['reveal']}",
                 placeholder="例: EMA16を上から下に割らずに反発、出来高も増加",
                 height=68,
             )
+            stop_loss_price = ecol2.number_input(
+                "損切りライン(円、必須)",
+                min_value=0.0,
+                value=0.0,
+                step=1.0,
+                key=f"stop_loss_{idx}_{sim['reveal']}",
+                help=f"参考: 判断週終値 {view.loc[latest_week, 'Close']:,.1f}円",
+            )
+            if latest_turnover is not None:
+                liquidity_note = (
+                    ""
+                    if liquidity_ok
+                    else "　⚠️ 10億円未満のため、実弾で買いにくい銘柄としてエントリー対象外です"
+                )
+                st.caption(f"判断週の週間売買代金: {latest_turnover:,.0f}円{liquidity_note}")
     else:
         total_exit_pct_preview = db.total_exit_percentage(sim["entry_id"])
         remaining_pct_preview = round(100 - total_exit_pct_preview, 4)
@@ -332,9 +379,15 @@ if latest_week is not None:
     if sim["entry_week"] is None:
         if next_week_str is None:
             c2.button("ここでエントリー", disabled=True, help="翌週(約定週)のデータがまだ存在しません")
+        elif not liquidity_ok:
+            c2.button("ここでエントリー", disabled=True, help="判断週の週間売買代金が10億円未満のため対象外です")
+        elif stop_loss_price <= 0:
+            c2.button("ここでエントリー", disabled=True, help="損切りライン(円)を入力してください")
         else:
             if c2.button(f"ここでエントリー(判断週{latest_week_str}→約定{next_week_str}寄付)", type="primary"):
-                entry_id = db.add_entry(code, next_week_str, comment=entry_comment)
+                entry_id = db.add_entry(
+                    code, next_week_str, comment=entry_comment, stop_loss_price=stop_loss_price
+                )
                 feats, _ = features.extract_features_for_entry(code, latest_week_str)
                 db.save_entry_features(entry_id, feats)
                 sim["entry_week"] = next_week_str
