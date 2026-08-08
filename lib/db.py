@@ -79,6 +79,16 @@ CREATE TABLE IF NOT EXISTS exit_events (
     created_at      TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+-- 「この銘柄のこの週は見送った」の記録。エントリーはentriesに残るが、見送った判断は
+-- 何も残らないため、生存者バイアスを防ぐ目的でここに理由を記録できるようにする。
+CREATE TABLE IF NOT EXISTS skips (
+    id         SERIAL PRIMARY KEY,
+    stock_code TEXT NOT NULL REFERENCES stocks(code) ON DELETE CASCADE,
+    week       TEXT NOT NULL,  -- 見送りを判断した週(判断週。ローソク足を見て判断した週そのもの)
+    comment    TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
 ALTER TABLE entries ADD COLUMN IF NOT EXISTS exit_week TEXT;
 ALTER TABLE exit_events ADD COLUMN IF NOT EXISTS comment TEXT;
 ALTER TABLE entries ADD COLUMN IF NOT EXISTS stop_loss_price DOUBLE PRECISION;
@@ -298,6 +308,57 @@ def total_exit_percentage(entry_id: int) -> float:
     if events.empty:
         return 0.0
     return float(events["exit_percentage"].sum())
+
+
+# ---------- skips (見送り理由の記録) ----------
+
+def add_skip(stock_code: str, week: str, comment: str = "") -> int:
+    """同じ(stock_code, week)の見送り記録が既にあれば理由を上書きし、なければ新規作成する。"""
+    with get_connection() as conn:
+        with _dict_cursor(conn) as cur:
+            cur.execute(
+                "SELECT id FROM skips WHERE stock_code = %s AND week = %s", (stock_code, week)
+            )
+            existing = cur.fetchone()
+            if existing:
+                cur.execute("UPDATE skips SET comment = %s WHERE id = %s", (comment, existing["id"]))
+                return existing["id"]
+            cur.execute(
+                "INSERT INTO skips (stock_code, week, comment) VALUES (%s, %s, %s) RETURNING id",
+                (stock_code, week, comment),
+            )
+            return cur.fetchone()["id"]
+
+
+def get_skip(stock_code: str, week: str) -> dict | None:
+    with get_connection() as conn:
+        with _dict_cursor(conn) as cur:
+            cur.execute(
+                "SELECT * FROM skips WHERE stock_code = %s AND week = %s", (stock_code, week)
+            )
+            row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def delete_skip(skip_id: int) -> None:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM skips WHERE id = %s", (skip_id,))
+
+
+def list_skips(stock_code: str | None = None) -> pd.DataFrame:
+    query = (
+        "SELECT skips.*, stocks.name AS stock_name FROM skips "
+        "JOIN stocks ON stocks.code = skips.stock_code"
+    )
+    params: tuple = ()
+    if stock_code:
+        query += " WHERE skips.stock_code = %s"
+        params = (stock_code,)
+    query += " ORDER BY skips.week DESC"
+    with get_connection() as conn:
+        df = pd.read_sql_query(query, conn, params=params)
+    return df
 
 
 # ---------- entry_features (③ 特徴量、縦持ち) ----------

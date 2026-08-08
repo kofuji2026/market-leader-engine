@@ -449,7 +449,43 @@ if sim["records"]:
     st.caption(f"この区間ではすでに{len(sim['records'])}件のエントリー/イグジットを記録済みです。")
 
 is_fully_closed = sim["entry_id"] is not None and db.total_exit_percentage(sim["entry_id"]) >= 100
-if at_max and not is_fully_closed:
+never_entered_this_visit = sim["entry_week"] is None
+
+# 表示できる範囲の上限まで来て、なおかつ今回一度もエントリーしていない場合。
+# 「エントリーしなかった」判断も、理由を残さないと生存者バイアス(成功例しか記録に残らない)の
+# 原因になるため、全週を見終えた後に見送り理由を記録できるようにする。
+if at_max and not is_fully_closed and never_entered_this_visit and latest_week is not None:
+    if sim["records"]:
+        # この区間では過去にエントリー済み(今回訪問分は見送っただけ)なので、理由記入は不要。
+        st.info("この区間で表示できる範囲の上限まで進みました。")
+        if st.button("次の区間へ進む →", type="primary", key=f"skip_next_with_records_{idx}"):
+            st.session_state[idx_key] = min(idx + 1, len(all_surges) - 1)
+            st.rerun()
+    else:
+        existing_skip = db.get_skip(code, latest_week_str)
+        st.warning("この区間では全期間を見てもエントリーしませんでした。見送った理由を記録してください。")
+        skip_comment = st.text_area(
+            "なぜこの銘柄・この区間ではエントリーしなかったか",
+            value=(existing_skip["comment"] if existing_skip else "") or "",
+            key=f"skip_comment_{idx}_{sim['reveal']}",
+            placeholder="例: 出来高が伴わず、上ヒゲが多かったため様子見",
+            height=68,
+        )
+        skip_col1, skip_col2 = st.columns([1, 3])
+        if skip_col1.button("理由を保存して次の区間へ", type="primary", key=f"skip_save_next_{idx}"):
+            if not skip_comment.strip():
+                st.error("理由を入力してください。")
+            else:
+                db.add_skip(code, latest_week_str, comment=skip_comment)
+                st.session_state[idx_key] = min(idx + 1, len(all_surges) - 1)
+                st.rerun()
+        if skip_col2.button("理由だけ保存する", key=f"skip_save_only_{idx}"):
+            if not skip_comment.strip():
+                st.error("理由を入力してください。")
+            else:
+                db.add_skip(code, latest_week_str, comment=skip_comment)
+                st.success("見送り理由を保存しました。")
+elif at_max and not is_fully_closed:
     st.info("この区間で表示できる範囲の上限まで進みました。エントリー/イグジットを記録するか、次の区間に進んでください。")
 
 with st.expander("この銘柄の記録済みエントリー"):
@@ -486,4 +522,16 @@ with st.expander("この銘柄の記録済みエントリー"):
                 if sim.get("entry_id") == erow["id"]:
                     sim["entry_week"] = None
                     sim["entry_id"] = None
+                st.rerun()
+
+with st.expander("この銘柄の記録済み見送り理由"):
+    existing_skips = db.list_skips(stock_code=code)
+    if existing_skips.empty:
+        st.caption("まだありません。")
+    else:
+        for _, srow in existing_skips.iterrows():
+            scol1, scol2 = st.columns([5, 1])
+            scol1.write(f"{srow['week']} — {srow['comment'] or '(理由なし)'}")
+            if scol2.button("削除", key=f"timing_del_skip_{srow['id']}"):
+                db.delete_skip(srow["id"])
                 st.rerun()
