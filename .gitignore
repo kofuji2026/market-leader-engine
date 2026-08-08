@@ -1,0 +1,14 @@
+# secrets(DB接続情報など)は絶対にコミットしない
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# ローカルSQLite(移行後は不要になるが念のため除外)
+db/*.db
+
+# OS
+.DS_Store
+Thumbs.db
