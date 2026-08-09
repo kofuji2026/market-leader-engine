@@ -24,7 +24,7 @@ from plotly.subplots import make_subplots  # noqa: E402
 import lib.indicators  # noqa: E402, F401 — 指標登録のため
 from lib import db, features  # noqa: E402
 from lib.indicators import registry  # noqa: E402
-from lib.screener import detect_surge_periods, random_period  # noqa: E402
+from lib.screener import detect_surge_periods, find_lookalike_failures, random_period  # noqa: E402
 
 st.set_page_config(page_title="Timing | Market Leader Engine", page_icon="🎯", layout="wide")
 db.init_db()
@@ -49,10 +49,17 @@ after_weeks = col_c.select_slider("急騰後、進められる週数", options=[
 
 display_mode = st.radio(
     "表示順",
-    ["倍率が大きい順", "急騰区間をランダム順", "全期間からランダム抽出(急騰しなかったケースも含む)"],
+    [
+        "倍率が大きい順",
+        "急騰区間をランダム順",
+        "全期間からランダム抽出(急騰しなかったケースも含む)",
+        "大相場(A)と初動そっくりの不発(B)をランダム表示",
+    ],
     horizontal=True,
     help="急騰した区間だけを見ていると、成功パターンばかり学習してしまう(生存者バイアス)。"
-    "ランダム抽出なら、初動が似ていても大相場にならなかったケースも自然に混ざる。",
+    "ランダム抽出なら、初動が似ていても大相場にならなかったケースも自然に混ざる。"
+    "「大相場(A)と初動そっくりの不発(B)」は、初動の値動きの形が特に似ている実例だけを"
+    "意図的にペアにして混ぜるモード(どちらに当たったかは表示されません)。",
 )
 
 
@@ -91,6 +98,24 @@ def _generate_random(codes_and_names: tuple, before_weeks: int, after_weeks: int
     return rows
 
 
+@st.cache_data(show_spinner="初動が似ているのに不発だった区間を探索中…")
+def _generate_lookalike_pairs(codes_and_names: tuple, min_multiple: float):
+    """Group A(大相場になった区間)と、その初動に形が似ているのに結局大相場に
+    ならなかったGroup B(不発)を探して、両方まとめて返す。"""
+    weekly_by_code = {}
+    name_theme_by_code = {}
+    for code, name, theme in codes_and_names:
+        try:
+            weekly_by_code[code] = features.load_weekly(code)
+        except features.FeatureExtractionError:
+            continue
+        name_theme_by_code[code] = (name, theme)
+
+    group_a = _scan_all(codes_and_names, min_multiple)
+    group_b = find_lookalike_failures(weekly_by_code, name_theme_by_code, group_a)
+    return group_a, group_b
+
+
 codes_and_names = tuple((r["code"], r["name"], r["theme"]) for _, r in stocks.iterrows())
 
 if display_mode == "倍率が大きい順":
@@ -109,7 +134,7 @@ elif display_mode == "急騰区間をランダム順":
     all_surges = base.copy()
     rng.shuffle(all_surges)
     order_note = "検出済みの急騰区間(最小倍率以上)を、ランダムな順に並べています。"
-else:
+elif display_mode == "全期間からランダム抽出(急騰しなかったケースも含む)":
     random_seed_key = "timing_random_seed"
     if random_seed_key not in st.session_state:
         st.session_state[random_seed_key] = random.randint(0, 1_000_000)
@@ -121,6 +146,22 @@ else:
         codes_and_names, before_weeks, after_weeks, 200, st.session_state[random_seed_key]
     )
     order_note = "全期間からランダムに抽出しています(急騰しなかったケースも含みます)。"
+else:
+    lookalike_seed_key = f"timing_lookalike_seed_{min_multiple}"
+    if lookalike_seed_key not in st.session_state:
+        st.session_state[lookalike_seed_key] = random.randint(0, 1_000_000)
+    if st.button("🔀 シャッフルし直す"):
+        st.session_state[lookalike_seed_key] = random.randint(0, 1_000_000)
+        st.session_state[f"timing_idx_{display_mode}_{min_multiple}"] = 0
+        st.rerun()
+    group_a, group_b = _generate_lookalike_pairs(codes_and_names, min_multiple)
+    rng = random.Random(st.session_state[lookalike_seed_key])
+    all_surges = group_a + group_b
+    rng.shuffle(all_surges)
+    order_note = (
+        f"「大相場になった区間(A・{len(group_a)}件)」と「初動の形は似ているのに結局大相場に"
+        f"ならなかった区間(B・{len(group_b)}件)」をランダムに混ぜています。どちらかは表示されません。"
+    )
 
 if not all_surges:
     st.info("条件に合う区間が見つかりませんでした。設定を変えてみてください。")
