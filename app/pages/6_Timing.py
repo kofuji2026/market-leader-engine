@@ -31,6 +31,15 @@ db.init_db()
 
 MIN_TURNOVER = 1_000_000_000  # 週間売買代金がこれ未満の週は、実弾で買えないとみなしエントリー対象外にする
 
+# 「大相場(A)と初動そっくりの不発(B)」モード専用の設定。
+# 当初は上の「最小倍率」スライダー(かつmax_horizon=156週=3年)をそのまま使っていたが、
+# 実測したところ谷→山の期間が中央値121週(=「次の週へ」を121回)にもなる区間が多く、
+# 一方でB(不発)は中央値23回で決着するため、「Aがなかなか急騰せずBばかりに見える」
+# という体感の偏りが生じた。学習用途では「初動を見てから比較的早く決着がつく」方が
+# 実用的なため、このモードに限りAも「半年(26週)以内に3倍以上」に絞って揃えている。
+LOOKALIKE_MIN_MULTIPLE = 3.0
+LOOKALIKE_MAX_HORIZON = 26
+
 st.title("🎯 Timing(急騰タイミング分析)")
 st.caption(
     "急騰「前」のチャートだけを見ながら、1週ずつ先を明らかにしていく。"
@@ -64,14 +73,14 @@ display_mode = st.radio(
 
 
 @st.cache_data(show_spinner="全銘柄をスキャン中…")
-def _scan_all(codes_and_names: tuple, min_multiple: float):
+def _scan_all(codes_and_names: tuple, min_multiple: float, max_horizon: int = 156):
     rows = []
     for code, name, theme in codes_and_names:
         try:
             weekly = features.load_weekly(code)
         except features.FeatureExtractionError:
             continue
-        periods = detect_surge_periods(weekly, min_multiple=min_multiple)
+        periods = detect_surge_periods(weekly, min_multiple=min_multiple, max_horizon=max_horizon)
         for p in periods:
             rows.append({"code": code, "name": name, "theme": theme, "period": p})
     rows.sort(key=lambda r: r["period"].multiple, reverse=True)
@@ -99,9 +108,9 @@ def _generate_random(codes_and_names: tuple, before_weeks: int, after_weeks: int
 
 
 @st.cache_data(show_spinner="初動が似ているのに不発だった区間を探索中…")
-def _generate_lookalike_pairs(codes_and_names: tuple, min_multiple: float):
-    """Group A(大相場になった区間)と、その初動に形が似ているのに結局大相場に
-    ならなかったGroup B(不発)を探して、両方まとめて返す。"""
+def _generate_lookalike_pairs(codes_and_names: tuple):
+    """Group A(半年以内にLOOKALIKE_MIN_MULTIPLE倍以上になった区間)と、その初動に形が
+    似ているのに結局大相場にならなかったGroup B(不発)を探して、両方まとめて返す。"""
     weekly_by_code = {}
     name_theme_by_code = {}
     for code, name, theme in codes_and_names:
@@ -111,8 +120,10 @@ def _generate_lookalike_pairs(codes_and_names: tuple, min_multiple: float):
             continue
         name_theme_by_code[code] = (name, theme)
 
-    group_a = _scan_all(codes_and_names, min_multiple)
-    group_b = find_lookalike_failures(weekly_by_code, name_theme_by_code, group_a)
+    group_a = _scan_all(codes_and_names, LOOKALIKE_MIN_MULTIPLE, max_horizon=LOOKALIKE_MAX_HORIZON)
+    group_b = find_lookalike_failures(
+        weekly_by_code, name_theme_by_code, group_a, max_horizon=LOOKALIKE_MAX_HORIZON
+    )
     return group_a, group_b
 
 
@@ -147,20 +158,22 @@ elif display_mode == "全期間からランダム抽出(急騰しなかったケ
     )
     order_note = "全期間からランダムに抽出しています(急騰しなかったケースも含みます)。"
 else:
-    lookalike_seed_key = f"timing_lookalike_seed_{min_multiple}"
+    lookalike_seed_key = "timing_lookalike_seed"
     if lookalike_seed_key not in st.session_state:
         st.session_state[lookalike_seed_key] = random.randint(0, 1_000_000)
     if st.button("🔀 シャッフルし直す"):
         st.session_state[lookalike_seed_key] = random.randint(0, 1_000_000)
-        st.session_state[f"timing_idx_{display_mode}_{min_multiple}"] = 0
+        st.session_state[f"timing_idx_{display_mode}"] = 0
         st.rerun()
-    group_a, group_b = _generate_lookalike_pairs(codes_and_names, min_multiple)
+    group_a, group_b = _generate_lookalike_pairs(codes_and_names)
     rng = random.Random(st.session_state[lookalike_seed_key])
     all_surges = group_a + group_b
     rng.shuffle(all_surges)
     order_note = (
-        f"「大相場になった区間(A・{len(group_a)}件)」と「初動の形は似ているのに結局大相場に"
-        f"ならなかった区間(B・{len(group_b)}件)」をランダムに混ぜています。どちらかは表示されません。"
+        f"半年以内に{LOOKALIKE_MIN_MULTIPLE:.0f}倍以上になった「大相場(A・{len(group_a)}件)」と、"
+        f"初動の形は似ているのに結局大相場にならなかった「不発(B・{len(group_b)}件)」をランダムに"
+        "混ぜています。どちらかは表示されません。"
+        "(上の「最小倍率」スライダーはこのモードでは使いません)"
     )
 
 if not all_surges:
@@ -169,7 +182,8 @@ if not all_surges:
 
 st.write(f"{len(all_surges)}区間を対象にしています。{order_note}")
 
-idx_key = f"timing_idx_{display_mode}_{min_multiple}"
+is_lookalike_mode = display_mode == "大相場(A)と初動そっくりの不発(B)をランダム表示"
+idx_key = f"timing_idx_{display_mode}" if is_lookalike_mode else f"timing_idx_{display_mode}_{min_multiple}"
 if idx_key not in st.session_state:
     st.session_state[idx_key] = 0
 st.session_state[idx_key] = max(0, min(st.session_state[idx_key], len(all_surges) - 1))
@@ -181,7 +195,11 @@ code, name, theme, period = current["code"], current["name"], current["theme"], 
 # 区間ごとの週送り・エントリー/イグジット状態。
 # 1つの急騰区間の中でも複数回エントリーできるように、確定したペアは records に積んでいき、
 # entry_week/exit_week は「今まさに記録しようとしている1回分」だけを保持する。
-sim_key = f"sim_{display_mode}_{idx}_{min_multiple}_{before_weeks}_{after_weeks}"
+sim_key = (
+    f"sim_{display_mode}_{idx}_{before_weeks}_{after_weeks}"
+    if is_lookalike_mode
+    else f"sim_{display_mode}_{idx}_{min_multiple}_{before_weeks}_{after_weeks}"
+)
 if sim_key not in st.session_state:
     st.session_state[sim_key] = {
         "reveal": 0,
